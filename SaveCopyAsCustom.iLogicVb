@@ -1,0 +1,214 @@
+﻿Sub Main()
+    ' Prompt user to input project folder name
+    Dim projectName As String = InputBox("Enter the new Project Number:", "New Project Number")
+
+    ' Check if project folder name is not empty
+    If String.IsNullOrEmpty(projectName) Then
+        Console.WriteLine("Project Number cannot be empty. Exiting...")
+        Return
+    End If
+	
+	' Prompt user to input project company
+    Dim projectCompany As String = InputBox("Enter the new Project Company:", "New Project Company")
+
+    ' Check if project company is not empty
+    If String.IsNullOrEmpty(projectCompany) Then
+        Console.WriteLine("Project Company cannot be empty. Exiting...")
+        Return
+    End If
+
+    ' Prompt user to confirm the inputted project folder name
+    Dim confirmMessage As String = "You entered the new Project Number as: " & projectName & vbCrLf & "Is this correct?" & vbCrLf & "This will delete any existing files in the project folder for " & projectName & "!"
+    Dim confirmation As DialogResult = MessageBox.Show(confirmMessage, "Confirm New Project Number", MessageBoxButtons.YesNo, MessageBoxIcon.Exclamation)
+    
+    ' Check user confirmation
+    If confirmation <> DialogResult.Yes Then
+        Console.WriteLine("User canceled. Exiting...")
+        Return
+    End If
+	
+    ' Check if project folder name is not empty
+    If String.IsNullOrEmpty(projectName) Then
+        Console.WriteLine("Project folder name cannot be empty. Exiting...")
+        Return
+    End If
+
+    ' Define the working directory
+    Dim workingFolder As String = "C:\$WorkingFolder\Designs"
+
+    ' Create the project folder path
+    Dim projectFolderPath As String = System.IO.Path.Combine(workingFolder, projectName & " - " & projectCompany)
+
+    ' Check if the project folder already exists
+    If Not System.IO.Directory.Exists(projectFolderPath) Then
+        ' Create the project folder if it doesn't exist
+        System.IO.Directory.CreateDirectory(projectFolderPath)
+    End If
+
+    ' Define the subfolders for assemblies and parts
+    Dim assembliesFolderPath As String = System.IO.Path.Combine(projectFolderPath, "Assemblies")
+    Dim partsFolderPath As String = System.IO.Path.Combine(projectFolderPath, "Parts")
+
+    ' Delete existing files within the assemblies and parts folders
+    DeleteFilesInFolder(assembliesFolderPath)
+    DeleteFilesInFolder(partsFolderPath)
+
+    ' Get the active assembly document in Inventor
+    Dim assemblyDoc As AssemblyDocument = ThisApplication.ActiveDocument
+
+    ' Check if there's an active assembly document
+    If assemblyDoc Is Nothing Then
+        Console.WriteLine("No active assembly document found.")
+        Return
+    End If
+
+    ' Save the main assembly with the new project number
+    Dim assemblyFileName As String = System.IO.Path.GetFileNameWithoutExtension(assemblyDoc.FullFileName)
+
+    ' Remove "_Rxx" from the end of the main assembly file name if present
+    If System.Text.RegularExpressions.Regex.IsMatch(assemblyFileName, "_R\d{2}$") Then
+        assemblyFileName = System.Text.RegularExpressions.Regex.Replace(assemblyFileName, "_R\d{2}$", "")
+    End If
+
+    Dim newAssemblyFileName As String = assemblyFileName.Replace(assemblyFileName.Split("_"c)(0), projectName)
+    Dim newAssemblyFilePath As String = System.IO.Path.Combine(assembliesFolderPath, newAssemblyFileName & ".iam")
+    assemblyDoc.SaveAs(newAssemblyFilePath, True)
+
+	' Extract the first 4 digits of the original main assembly file name
+	Dim originalProjectNumber As String = assemblyFileName.Substring(0, 4)
+
+    ' Close the original assembly document
+    assemblyDoc.Close(True)
+	
+	' Open the new assembly document
+    Dim newAssemblyDoc As AssemblyDocument = ThisApplication.Documents.Open(newAssemblyFilePath)
+	
+	' Set the Revision Number iProperty for the new assembly document
+    Dim summaryInfo As PropertySet = newAssemblyDoc.PropertySets.Item("Inventor Summary Information")
+    Dim revProp As Inventor.Property
+    Try
+        revProp = summaryInfo.Item("Revision Number")
+    Catch ex As Exception
+	
+    ' Create the Revision Number property if it doesn't exist
+    revProp = summaryInfo.Add("", "Revision Number")
+    End Try
+    revProp.Value = "00"
+    newAssemblyDoc.Save()
+	
+	 ' Setup Progress Bar
+	Dim iStepCount As Long = 0
+	Dim iStepMax As Long = 0
+    Dim oMessage As String = "Generating new files...."
+    Dim progressBarP As Inventor.ProgressBar
+    progressBarP = ThisApplication.CreateProgressBar(False,iStepCount,oMessage)
+    Dim occurrences As ComponentOccurrences = newAssemblyDoc.ComponentDefinition.Occurrences
+    If occurrences IsNot Nothing Then
+        For Each occurrence As ComponentOccurrence In occurrences
+            iStepMax += 1
+        Next
+		
+    Else
+        Console.WriteLine("No occurrences found in the assembly document.")
+        Return
+    End If
+	
+    ' Initialize a HashSet to store unique file paths
+    Dim uniqueFilePaths As New HashSet(Of String)
+
+    ' Update occurrences in the new assembly document
+      UpdateOccurrences(newAssemblyDoc.ComponentDefinition.Occurrences, projectName, assembliesFolderPath, partsFolderPath, uniqueFilePaths, progressBarP, iStepMax, originalProjectNumber)
+
+    ' Save the changes to the new assembly document
+    newAssemblyDoc.Save()
+
+    ' Close the new assembly document
+    newAssemblyDoc.Close(True)
+
+    ' Close the progress bar
+    progressBarP.Close
+
+    ' Reopen the newly saved assembly document
+    ThisApplication.Documents.Open(newAssemblyFilePath)
+
+    ' Confirm the new project assembly has been created
+    Dim confirmMessageFinal As String = "New project assembly created for Project Number: " & projectName & "." & vbCrLf & "Please check model carefully before proceding."
+    Dim confirmationFinal As DialogResult = MessageBox.Show(confirmMessageFinal, "New Project Assembly Created", MessageBoxButtons.OK)
+End Sub
+
+Sub UpdateOccurrences(occurrences As ComponentOccurrences, projectName As String, assembliesFolderPath As String, partsFolderPath As String, uniqueFilePaths As HashSet(Of String), progressBarP As Inventor.ProgressBar, iStepMax As String, originalMainAssemblyDigits As String)
+    For Each occurrence As ComponentOccurrence In occurrences
+        Try
+            Dim partDoc As Document = occurrence.Definition.Document
+
+            ' Check if the occurrence is a part or subassembly document
+            If partDoc IsNot Nothing Then
+                ' Check if the document type is valid (part or assembly)
+                If partDoc.DocumentType = DocumentTypeEnum.kPartDocumentObject OrElse partDoc.DocumentType = DocumentTypeEnum.kAssemblyDocumentObject Then
+                    ' Check if the part or subassembly file name starts with 4 numbers followed by an underscore and matches the original main assembly digits
+                    Dim partFileName As String = System.IO.Path.GetFileNameWithoutExtension(partDoc.FullFileName)
+                    Dim partExtension As String = System.IO.Path.GetExtension(partDoc.FullFileName)
+                    If System.Text.RegularExpressions.Regex.IsMatch(partFileName, "^\d{4}_") AndAlso partFileName.Substring(0, 4) = originalMainAssemblyDigits Then
+                        iStepCount += 1
+                        progressBarP.Message = "Generating " + CStr(iStepCount) + " files."
+                        progressBarP.UpdateProgress
+
+                        ' Remove "_Rxx" from the end of the part file name if present
+                        Dim newPartFileName As String = partFileName
+                        If System.Text.RegularExpressions.Regex.IsMatch(newPartFileName, "_R\d{2}$") Then
+                            newPartFileName = System.Text.RegularExpressions.Regex.Replace(newPartFileName, "_R\d{2}$", "")
+                        End If
+
+                        ' Replace the first 4 characters of the file name with the new project number
+                        newPartFileName = newPartFileName.Replace(newPartFileName.Split("_"c)(0), projectName)
+
+                        ' Construct the new file path
+                        Dim newPartFilePath As String = System.IO.Path.Combine(If(partExtension.ToLower() = ".ipt", partsFolderPath, assembliesFolderPath), newPartFileName & partExtension)
+
+                        ' Save a copy of the part document to the new folder if it's not already saved
+                        If uniqueFilePaths.Add(newPartFilePath) Then
+                            partDoc.SaveAs(newPartFilePath, True)
+
+                            ' Replace the occurrence with another part/assembly
+                            occurrence.Replace(newPartFilePath, True)
+
+                            ' Open the document in the background to modify properties without making it visible
+                            Dim newPartDoc As Document = ThisApplication.Documents.Open(newPartFilePath, False)
+
+                            ' Check and set the Revision Number iProperty
+                            Dim summaryInfo As PropertySet = newPartDoc.PropertySets.Item("Inventor Summary Information")
+                            Dim revProp As Inventor.Property
+                            Try
+                                revProp = summaryInfo.Item("Revision Number")
+                            Catch ex As Exception
+                                ' Create the Revision Number property if it doesn't exist
+                                revProp = summaryInfo.Add("", "Revision Number")
+                            End Try
+                            revProp.Value = "00"
+                            newPartDoc.Save()
+                            newPartDoc.Close(True)
+
+                            ' Recursively update occurrences in subassemblies
+                            If partDoc.DocumentType = DocumentTypeEnum.kAssemblyDocumentObject Then
+                                UpdateOccurrences(occurrence.SubOccurrences, projectName, assembliesFolderPath, partsFolderPath, uniqueFilePaths, progressBarP, iStepMax, originalMainAssemblyDigits)
+                            End If
+                        End If
+                    End If
+                End If
+            End If
+        Catch ex As Exception
+            Console.WriteLine("Error processing occurrence: {ex.Message}")
+        End Try
+    Next
+End Sub
+
+
+
+
+Sub DeleteFilesInFolder(folderPath As String)
+    If System.IO.Directory.Exists(folderPath) Then
+        For Each filePath As String In System.IO.Directory.GetFiles(folderPath)
+            System.IO.File.Delete(filePath)
+        Next
+    End If
+End Sub
